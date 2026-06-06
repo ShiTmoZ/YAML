@@ -1,0 +1,137 @@
+name: smart-audio-downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        required: true
+        type: string
+
+      quality:
+        type: choice
+        default: "320k"
+        options:
+          - LOSSLESS
+          - 320k
+          - 192k
+          - 128k
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-pip curl jq
+          pip3 install yt-dlp
+
+      - name: Prepare
+        run: mkdir -p music
+
+      - name: Download engine
+        env:
+          URLS: ${{ github.event.inputs.urls }}
+          QUALITY: ${{ github.event.inputs.quality }}
+        run: |
+          echo "$URLS" | tr ',' '\n' > urls.txt
+
+          # quality map
+          if [ "$QUALITY" = "LOSSLESS" ]; then
+            AUDIO="-x --audio-format flac"
+          elif [ "$QUALITY" = "320k" ]; then
+            AUDIO="-x --audio-format mp3 --audio-quality 0"
+          elif [ "$QUALITY" = "192k" ]; then
+            AUDIO="-x --audio-format mp3 --audio-quality 2"
+          else
+            AUDIO="-x --audio-format mp3 --audio-quality 5"
+          fi
+
+          download() {
+            url="$1"
+
+            echo "=================================="
+            echo "Processing: $url"
+            echo "=================================="
+
+            # normalize spotify URLs
+            if echo "$url" | grep -q "spotify.com"; then
+              echo "Spotify detected → direct extractor mode"
+
+              yt-dlp "$url" \
+                $AUDIO \
+                --no-playlist \
+                --retries 5 \
+                --fragment-retries 5 \
+                --add-header "User-Agent: Mozilla/5.0" \
+                -o "music/%(title)s.%(ext)s" && return
+            fi
+
+            # direct normal extraction (no search)
+            yt-dlp "$url" \
+              $AUDIO \
+              --no-playlist \
+              --retries 5 \
+              --fragment-retries 5 \
+              -o "music/%(title)s.%(ext)s" || {
+
+                echo "Fallback layer 1 (no search, retry extractor tweak)"
+
+                yt-dlp "$url" \
+                  $AUDIO \
+                  --extractor-args "youtube:player_client=android" \
+                  -o "music/%(title)s.%(ext)s"
+              } || {
+
+                echo "Fallback layer 2 (web client mode)"
+
+                yt-dlp "$url" \
+                  $AUDIO \
+                  --extractor-args "youtube:player_client=web" \
+                  -o "music/%(title)s.%(ext)s"
+              } || {
+
+                echo "Fallback layer 3 (last resort)"
+
+                yt-dlp "$url" \
+                  $AUDIO \
+                  --force-ipv4 \
+                  -o "music/%(title)s.%(ext)s"
+              }
+          }
+
+          while read -r url; do
+            [ -z "$url" ] && continue
+            download "$url"
+          done < urls.txt
+
+      - name: Normalize audio
+        run: |
+          for f in music/*; do
+            [ -f "$f" ] || continue
+
+            base="${f%.*}"
+
+            if [ "${{ github.event.inputs.quality }}" = "LOSSLESS" ]; then
+              ffmpeg -y -i "$f" -c:a flac "${base}_final.flac" && rm "$f"
+            else
+              ffmpeg -y -i "$f" -c:a libmp3lame -b:a "${{ github.event.inputs.quality }}" "${base}_final.mp3" && rm "$f"
+            fi
+          done
+
+      - name: Commit to repo
+        run: |
+          git config user.name "github-actions"
+          git config user.email "bot@github.com"
+
+          git add music/
+          git commit -m "🎧 audio batch update" || echo "no changes"
+          git pull --rebase || true
+          git push
