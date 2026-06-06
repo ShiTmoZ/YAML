@@ -1,0 +1,70 @@
+name: smart-music-downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        required: true
+        type: string
+      format:
+        type: choice
+        options: [flac, mp3, m4a]
+        default: mp3
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-pip jq
+          pip3 install --upgrade yt-dlp spotipy
+
+      - name: Prepare folder
+        run: mkdir -p music
+
+      - name: Process
+        env:
+          INPUT_URLS: ${{ github.event.inputs.urls }}
+          FORMAT: ${{ github.event.inputs.format }}
+        run: |
+          echo "$INPUT_URLS" | tr ',' '\n' > urls.txt
+
+          while read -r url; do
+            [ -z "$url" ] && continue
+
+            echo "Processing: $url"
+
+            # Spotify detection
+            if echo "$url" | grep -q "spotify.com"; then
+              QUERY=$(echo "$url" | sed 's/.*track\///' | cut -d'?' -f1)
+
+              echo "Spotify detected → converting to search"
+
+              yt-dlp "ytsearch1:${QUERY}" \
+                -x --audio-format "$FORMAT" \
+                -o "music/%(title)s.%(ext)s"
+
+            else
+              yt-dlp "$url" \
+                -x --audio-format "$FORMAT" \
+                -o "music/%(title)s.%(ext)s"
+            fi
+
+          done < urls.txt
+
+      - name: Commit to repo
+        run: |
+          git config user.name "github-actions"
+          git config user.email "bot@github.com"
+
+          git add music/
+          git commit -m "music update" || echo "no changes"
+          git push
