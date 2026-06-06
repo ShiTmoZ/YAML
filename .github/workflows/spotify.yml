@@ -1,4 +1,4 @@
-name: stable-music-downloader
+name: ultra-stable-music-downloader
 
 on:
   workflow_dispatch:
@@ -31,63 +31,49 @@ jobs:
       - name: Prepare
         run: mkdir -p music
 
-      - name: Downloader Engine
+      - name: Download engine
         env:
           URLS: ${{ github.event.inputs.urls }}
           QUALITY: ${{ github.event.inputs.quality }}
         run: |
           echo "$URLS" | tr ',' '\n' > urls.txt
 
-          # quality map
           if [ "$QUALITY" = "LOSSLESS" ]; then
             AUDIO="-x --audio-format flac"
           else
             AUDIO="-x --audio-format mp3 --audio-quality 0"
           fi
 
-          extract_spotify() {
+          download() {
             url="$1"
-            id=$(echo "$url" | awk -F'/' '{print $NF}' | cut -d'?' -f1)
 
-            # extract page title (NO DRM bypass, only metadata)
-            title=$(curl -s "https://open.spotify.com/track/$id" \
-              | grep -oP '(?<=<title>).*?(?=</title>)' \
-              | sed 's/ | Spotify//')
+            echo "=================================="
+            echo "Processing: $url"
+            echo "=================================="
 
-            echo "$title"
-          }
-
-          download_youtube() {
-            query="$1"
-
-            yt-dlp "ytsearch1:${query}" \
+            yt-dlp "$url" \
               $AUDIO \
               --no-playlist \
-              --retries 5 \
-              -o "music/%(title)s.%(ext)s"
+              --retries 10 \
+              --fragment-retries 10 \
+              --extractor-args "youtube:player_client=android,web,mweb" \
+              --js-runtimes deno \
+              --force-ipv4 \
+              --sleep-interval 2 \
+              --max-sleep-interval 5 \
+              -o "music/%(title)s.%(ext)s" || {
+
+                echo "Fallback: invidious mirror"
+
+                yt-dlp "https://invidious.io/api/v1/search?q=$(echo $url | head -c 50)" \
+                  $AUDIO \
+                  -o "music/%(title)s.%(ext)s"
+              }
           }
 
           while read -r url; do
             [ -z "$url" ] && continue
-
-            echo "================================="
-            echo "Processing: $url"
-            echo "================================="
-
-            if echo "$url" | grep -q "spotify.com"; then
-              query=$(extract_spotify "$url")
-
-              if [ -z "$query" ]; then
-                echo "Fallback: using raw ID"
-                query=$(echo "$url" | awk -F'/' '{print $NF}' | cut -d'?' -f1)
-              fi
-
-              echo "Resolved query: $query"
-              download_youtube "$query"
-            else
-              yt-dlp "$url" $AUDIO -o "music/%(title)s.%(ext)s"
-            fi
-
+            download "$url"
           done < urls.txt
 
       - name: Normalize
@@ -97,19 +83,19 @@ jobs:
 
             base="${f%.*}"
 
-            if [ "$QUALITY" = "LOSSLESS" ]; then
+            if [ "${{ github.event.inputs.quality }}" = "LOSSLESS" ]; then
               ffmpeg -y -i "$f" -c:a flac "${base}_final.flac" && rm "$f"
             else
               ffmpeg -y -i "$f" -c:a libmp3lame -b:a 320k "${base}_final.mp3" && rm "$f"
             fi
           done
 
-      - name: Commit
+      - name: Commit to repo
         run: |
           git config user.name "github-actions"
           git config user.email "bot@github.com"
 
           git add music/
-          git commit -m "🎵 music update" || echo "no changes"
+          git commit -m "🎧 stable music update" || echo "no changes"
           git pull --rebase || true
           git push
